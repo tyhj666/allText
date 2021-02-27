@@ -47,7 +47,7 @@
              真正的数据库是配置在myCat里面的-->
           <property name="schema">TESTDB</property>
      </user>
-            ```
+       ```
      
 
 2. ##### 启动
@@ -691,7 +691,448 @@ ER表:Mycat 借鉴了NewSQL领域的新秀Foundation DB的设计思路，Foundat
       insert into payment_info(id,order_id,payment_status) values(4,104,01);
      ```
 
+4. 按日期(天)分片
+
+   - 此规则为按天分片，设定时间格式、范围
+
+     ```html
+     #修改schema.xml配置文件
+     <table name="login_info" dataNode="dn1,dn2" rule="sharding_by_date"></table>
+     #修改rule.xml配置文件
+     <tableRule name="sharding_by_date">
+        <rule>
+            <columns>login_date</columns>
+            <algorithm>shardingByDate</algorithm>
+         </rule>
+     </tableRule>
+     <function name="shardingByDate" class="io.myat.route.function.PartitionByDate">
+         <poperty name="dateFormat">yyyy-MM-dd</poperty>
+         <poperty name="sBeginDate">2019-01-01</poperty>
+         <!--这个结束时间必须配置，不然报错-->
+         <poperty name="sEndDate">2019-01-04</poperty>
+         <poperty name="sPartionDay">2</poperty>
+     </function>
+     #columns:分片字段，algorithm:分片函数
+     #datFomat:日期格式
+     #sBeginDate:开始日期
+     #sEndDate:结束日期，则代表数据达到了这个日期的分片后循环从开始分片插入
+     #sPartionDay:分区天数，即默认从开始日期算起，分隔两天一个分区
+     ```
+
+   - 创建表，插入数据
+
+     ```sql
+     create table login_info (
+        'id' int_auto_incpement comment '编号',
+         'user_id' int comment '用户编号',
+         'login_date' date comment '登录日期',
+         primary key (id)
+     )
      
+     insert into login_info(id,user_id,login_date) valus(1,101,'2019-01-01');
+     insert into login_info(id,user_id,login_date) valus(2,102,'2019-01-02');
+     insert into login_info(id,user_id,login_date) valus(3,103,'2019-01-03');
+     insert into login_info(id,user_id,login_date) valus(4,104,'2019-01-04');
+     insert into login_info(id,user_id,login_date) valus(5,103,'2019-01-05');
+     insert into login_info(id,user_id,login_date) valus(6,104,'2019-01-06');
+     ```
+
+   - 查询mycat,dn1,dn2可以看到数据分片效果
+
+   ### 2.4全局序列
+
+      1. 本地文件
+
+         此方式mycat将sequence配置到文件中，当使用到sequence中的配置后，mycat会更下classpath中的sequence_conf.properties文件中sequence当前的值
+
+         优点:本地加载，读取速度较快
+
+         缺点:抗风险能力差，mycat所在主机宕后，无法读取本地文件
+
+      2. 数据库方式
+
+         利用数据库一个表来进行计数累加，但是并不是每次生成序列都读写数据库，这样效率太低，mycat会预加载一部分号段到mycat的内存中，这样大部分读写序列都是在内存中完成的，如果内存中的号段用完了，mycat会再向数据库要一次。
+
+         - 建库序列脚本
+
+           ```sql
+           create table mycat_sequence(name varchar(50) not null,current_value int not null,increment int not null default 100,primary key (name)) engine=innode;
+           
+           #创建全局序列所需要的函数
+           delimiter $$
+           create function mycat_seq_currval(seq_name varchear(50)) returns varchar(64)
+           deterministic
+           begin
+           declare retval varchar(64);
+           set retval-"-99999999,null"'
+           select concat(cast(current_value as char),",",cast(increment as char))into retval from
+           mycat_sequence where name=seq_name;
+           return retval;
+           end $$
+           delimiter;
+           delimiter $$
+           create function mycat_sql_setval(seq_name varchar(50),value inteGer) returns
+           
+           #初始化序列表记录
+           insert into mycatg_$equence(name,current_val
+           ue,increment) values('oreders',40000,100);
+           
+           ```
+
+         - 修改mycat配置
+
+           ```html
+           #修改sequence_db_conf.properties
+           vim sequence_db_conf.properties
+           #意思是orders这个序列在dn1这个节点上，具体dn1节点是哪台机子，请参考schema.xml
+           #sequence stored in datnode
+           GLOBAL=dn1
+           COMPANY=dn1
+           CUSTOMER=dn1
+           ORDERS=dn1
+           ```
+
+         - 修改server.xml
+
+           ```html
+           #全局序列类型:0-本地文件  1-数据库方式  2-时间戳方式，此处应该修改成1
+           <property name="sequenceHandLerType">1</property>
+           ```
+
+         - 重新启动mycat,让配置生效
+
+         - 验证全局序列
+
+           ```html
+           #登录mycat,插入数据
+           insert into orders(id,amount,customer_id,order_type) values(next value for
+           mycatseq_orders,1000,101,102)
+           ```
+
+           
+
+      3. 自主生成全局序列
+
+         可在java项目里自己生成全局序列，如下:
+
+         1.根据业务逻辑组合
+
+         2.可以利用redis的单线程原子性incr来生成序列但是自主生成需要单证在工程中用java代码实现，还是推荐使用mycat自带全局
+
+   
+
+   
+
+   
+
+   # 3.基于HA机制的Mycat高可用
+
+   ​		在实际项目中，mycat服务也需要考虑高可用性，如果mycat所在服务器出现宕机或mysql服务器故障，需要有备机提供服务，需要考虑mycat集群
+
+      我们可以使用HAProxy+Keepalived配合两台Mycat搭起Mycat集群,实现高可用性，HAProxy实现了Mycat多节点的集群高可用和负载均衡，而HAProxy自身的高可用则可以通过Keepalived来实现
+
+   ![image-20210222220834104](C:\Users\admin\AppData\Roaming\Typora\typora-user-images\image-20210222220834104.png)
+
+   ![image-20210222221039257](C:\Users\admin\AppData\Roaming\Typora\typora-user-images\image-20210222221039257.png)
+
+### 3.1安装配置HAProxy,保证mycat的高可用
+
+```html
+#准备好HAProxy安装包，传到/opt目录下
+#解压到/usr/local/src
+  tar -zxvf haproxy-1.5.18.tar.gz -C /usr/local/src
+#进入解压后的目录，查看内核版本，进行编译
+cd /usr/local/src/haproxy-1.5.18
+uname -r
+make TARGET=linux310 PREFIX=/usr/local/haproxy ARCH=x86_64
+#TAGRET=linux310,内核版本，使用uname -r查看内核,如:3.10.0-514.el7,此时该参数就为linux310;
+#ARCH=x86_64,系统位数
+#PREFIX=/usr/local/haprpxy #/usr/local/haprpxy,为haprpxy安装路径
+#编译完成后进行安装
+make install PREFIX=/usr/local/haproxy
+#安装完成后,创建目录，创建HAProxy配置文件
+  mkdir -p /usr/data/haproxy/
+  vim /usr/local/haproxy/haproxy.conf
+#向配置文件中插入以下配置信息，并保存
+global
+   log 127.0.0.1 local0
+   #log 127.0.0.1 local1 notice
+   #log loghost local0 info
+maxconn 4096
+chroot /usr/local/haproxy
+pidfile /usr/data/haproxy/haproxy.pid
+uid 99
+gid 99
+daemon
+#debug
+#quiet
+defaults
+   log global
+    mode tcp
+    option abortonclose
+    option redispatch
+    retries 3
+   maxconn 2000
+   timeout connect 5000
+   timeout client 50000
+   timeout server 50000
+listen proxy_stats
+    bind:48066
+    mode tcp 
+    balance roundrobin
+    server mycat_1 192.168.140.128:8066 check inter 10s
+    server mycat_2 192.168.140.127:8066 check inter 10s
+frontend admins_stats
+    bind:7777
+    mode http
+    stats enable 
+    option httplog
+    maxconn 10
+    stats refresh 30s
+    stats uri /admin
+    stats auth admin:123123
+    stats hide-version
+    stats admin if TRUE
+```
+
+启动验证
+
+```html
+#1.启动HAProxy
+/usr/local/haproxy/sbin/haproxy -f /usr/local/haproxy/haproxy.conf
+#2查看HAProxy进程
+ps -ef|grep haproxy
+#打开浏览器访问
+http://192.168.140.125:7777/admin
+
+#验证负载均衡,通过HAProxy访问Mycat
+mysql -umycat -p123456 -h 192.168.140.125 -P 48066
+```
+
+### 3.2配置Keepalived,保证HAProxy的高可用性
+
+```html
+#1准备好Keepalived安装包，传到/opt目录下
+#解压到/usr/local/src
+   tar -zxvf keepalived-1.4.2tag.gz -C /usr/local/src
+#安装依赖插件
+  yum  install -y -gcc openssl-devel popt-devel
+#进入解压后的目录，进行配置，进行编译
+cd /usr/local/src/keepalived-1.4.2
+./configure --prefix=/usr/local/keepalived
+#进行编译，完成后进行安装
+make && make install
+#进行运行前的配置
+cp /usr/local/src/keepalived-1.4.2/keepalived/etc/init.d/keepalived  /etc/init.d/
+makdir /etc/keepalived
+cp /usr/local/keepalived/etc/keepalived.conf  /etc/keepalived/
+cp /ur/loca/src/keepalived-1.4.2/keepalived/etc/sysconfig/keepalived /etc/sysconfig/
+cp /usr/local/keepalived/sbin/keepalived /usr/sbin/
+
+
+
+#修改配置文件
+vim /etc/keepalived/keepalived.conf
+
+#启动验证
+service keepalived start
+#登录验证
+mysql -umycat -p123456 -h 192.168.140.200 -P 48066
+
+```
+
+
+
+# 4.MyCat安全设置
+
+#### 4.1权限配置
+
+   1. user标签权限控制
+
+      ​	目前MyCat对于中间件的连接控制并没有做太复杂的控制，目录只做了中间件逻辑库级别的读写权限控制，是通过server.xml的user标签进行配置
+
+      ```html
+      #server.xml配置文件user部分
+      <user name="mycat">
+         <property name="password">123456</property>
+         <property name="schemas">TESTDB</property>
+      </user>
+      <user name="user">
+        <proppety name="password">user</proppety>
+        <property name="schemas">TESTDB</property>
+        <property name="readOnly">true</property>
+      </user>
+      
+      #name="mycat": 应用连接中间逻辑库的用户名
+      #password: 该用户对应的密码
+      #TESTDB:应用当前连接的逻辑库中所对应的逻辑表，schemas中可以配置一个或多个
+      #readonly:应用连接中间件逻辑库所具有的权限，true为只读，false为读写都有，默认为false
+      
+      mysql -uuser -puser -h 192.168.140.128 -P 8066
+      use TESTDB切库的命令
+      ```
+
+          2. privileges标签权限控制
+
+        ​	在user标签下的privileges标签可以对逻辑库(schema),表(table)进行精细化的DML权限控制。
+
+        ​    privileges标签下的check属性，如为true开启权限检查，为false不开启，默认为false
+
+        ​    由于MyCat一个用户的schemas属性可配置对个逻辑库(schema),所以privileges的下级节点schema节点同样可以配置多个，对多库多表进行细粒度的DML权限控制
+
+        
+
+        配置说明
+
+      | DML权限 | 增加(insert) | 更新(update) | 查询(select) | 删除(delete) |
+      | ------- | ------------ | ------------ | ------------ | ------------ |
+      | 0000    | 静止         | 静止         | 静止         | 静止         |
+      | 0010    | 静止         | 静止         | 可以         | 静止         |
+      | 1110    | 可以         | 可以         | 可以         | 静止         |
+      | 1111    | 可以         | 可以         | 可以         | 可以         |
+
+        ```html
+        #server.xml配置文件privileges部分
+        #配置orders表没有增删改查的权限
+        <user name="mycat">
+           <property name="password">123456</property>
+           <property name="schemas">TESTDB</property>
+           <!--表级DML权限设置 
+               dm1="111"表示DML的权限是1111
+           -->
+           <privileges check="true">
+                <schema name="TESTDB" dm1="1111">
+                  <table name="orders" dm1="0000">
+                      
+                    </table>
+                </schema>
+            </privileges>
+        </user>
+        ```
+
+
+# 5.SQL拦截
+
+​	firewall标签用来定义防火墙；firewall下whitehost标签用来定义IP白名单，blacklist用来定义SQL黑名单
+
+​    1.白名单
+
+​            可以通过设置白名单，实现某主机某用户可以访问Mycat，而其它主机用户禁止访问
+
+```html
+#设置白名单
+#server.xml配置文件firewall标签
+#配置只有192.168.140.128主机可以通过mycat用户访问
+<firewall>
+    <whitehost>
+         <host host="192.168.140.128" user="mycat"/>
+    </whitehost>
+</firewall>
+
+#重启Mycat后，192.168.140.128主机使用mycat用户访问,看白名单是否生效，配置里面只配置了mycat可以访问,如果用其他用户登录，照样会拦截掉
+mysql -umycat -p123456 -h 192.168.140.128 -P 8006
+```
+
+  2.黑名单
+
+​			可以通过设置黑名单，实现Mycat对具体SQL操作的拦截，如增删改查等操作的拦截
+
+```html
+#设置黑名单
+#server.xml配置文件firewall标签
+#配置静止mycat用户进行删除操作
+<firewall>
+    <whitehost>
+         <host host="192.168.140.128" user="mycat"/>
+    </whitehost>
+    <blacklist check="true">
+        <property name="deleteAllow">false</property>
+    </blacklist>
+</firewall>
+```
+
+可以设置的黑名单SQL拦截功能列表
+
+| 配置项           | 缺省值 | 描述                        |
+| ---------------- | ------ | --------------------------- |
+| selectAllow      | true   | 是否允许执行select语句      |
+| deleteAllow      | true   | 是否允许执行delete语句      |
+| updateAllow      | true   | 是否允许执行update语句      |
+| insertAllow      | true   | 是否允许执行insert语句      |
+| createTableAllow | true   | 是否允许创建表              |
+| setAllow         | true   | 是否允许使用set语法         |
+| alterTableAllow  | true   | 是否允许执行alter table语句 |
+| dropTableAllow   | true   | 是否允许修改表              |
+| commitAllow      | true   | 是否执行commit操作          |
+| rollbackAllow    | true   | 是否允许执行roll back操作   |
+
+
+
+# 6.Mycat监控工具
+
+​      6.1Mycat-web简介
+
+​            Mycat-web是Mycat可视化运维平台的管理和监控平台，弥补了Mycat在监控上的空白，帮Mycat分担统计任务和配置管理任务，Mycat-web引入了ZoopKeeper作为配置中心，可以管理多个节点，Mycat-web主要管理和监控Mycat的流量，连接，活动线程和内存等，具备IP白名单，邮件告警等模块，还可以统计sql并分析慢sql和高频sql等。为优化sql提供依据。
+
+   6.2Mycat-web配置使用
+
+   1. ZooKeeper安装
+
+      ```html
+      #1.下载安装包http://zookeeper.apache.org/
+      #2.安装包拷贝到Linux系统的/opt目录下，并解压
+      mkdir /myzookeeper
+      cp -r zookeeper.3.4.11 /myzookeeper/
+      #3.进入ZooKeeper解压后的配置目录(conf),复制配置文件并改名
+      cp zoo_sample.cfg zoo.cfg
+      #4.进入ZooKeeper的命令目录(bin),运行启动命令
+      ./zkServer.sh start
+      ```
+
+         2. 在另外一台服务器上面安装Mycat-web
+
+            ```html
+            #1.下载安装包http://www.mycat.io/
+            #2.安装包拷贝到Linux系统/opt目录下，并解压
+            tar -zxvf Mycat-web-1.0-SNAPSHOT-20....tar.gz
+            #3.拷贝mycat-web文件夹到/usr/local目录下
+            cp -r mycat-web /usr/local
+            #4.进入mycat-web的目录下运行启动命令
+            cd /usr/local/mycat-web/
+            ./start.sh &
+            #5.Mycat-web服务端口为8082,查看服务已经启动
+            netstat-ant |grep 8082
+            #6. 通过地方访问服务
+            http://192.168.140.127:8082/mycat/
+            ```
+
+         3. 监控平台控制指标
+
+            在2步骤上面的页面里面配置
+
+            ![image-20210226220747568](C:\Users\admin\AppData\Roaming\Typora\typora-user-images\image-20210226220747568.png)
+
+![image-20210226220951853](C:\Users\admin\AppData\Roaming\Typora\typora-user-images\image-20210226220951853.png)
+
+上面点保存按钮，如果报错，先看看linux服务器的防火墙是否关闭，如果关了，再看看Mycat的配置文件server.xml里面的防火墙配置，要把服务器地址放到白名单里面才可以活着关掉配置里面的防火墙
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
